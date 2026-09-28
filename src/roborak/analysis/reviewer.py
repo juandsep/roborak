@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -93,6 +94,21 @@ MIN_DIFF_TOKENS = 256
 PROMPT_SAFETY_TOKENS = 200
 
 
+def _common_prefix(paths: list[str]) -> str:
+    """A short label for the files a pass covers: their shared directory, or a count.
+
+    One file names itself; several under one directory are named by that directory
+    so the progress line stays a line; anything wider falls back to a plain count."""
+    if not paths:
+        return ""
+    if len(paths) == 1:
+        return paths[0]
+    prefix = os.path.commonpath(paths)
+    if prefix and prefix not in {".", "/"}:
+        return f"{prefix}/ ({len(paths)} files)"
+    return f"{len(paths)} files"
+
+
 @dataclass(frozen=True)
 class DiffBudget:
     input_tokens: int
@@ -169,6 +185,13 @@ class Reviewer:
     checkpoint_store: StateStore | None = field(default=None, repr=False)
     checkpoint_key: str = field(default="", repr=False)
     preflight: Callable[[str], None] | None = field(default=None, repr=False)
+    progress: Callable[[str, str], None] | None = field(default=None, repr=False)
+    """Fine-grained progress within a stage, as ``(stage, detail)`` events.
+
+    Where ``preflight`` announces a stage is about to run, this reports movement
+    inside one -- the per-pass position of a chunked model review, most of all --
+    so the CLI can keep a live spinner current. The orchestrator emits; the CLI
+    decides how to render, and a ``None`` callback means nobody is listening."""
 
     def rules_for(self, changeset: ChangeSet) -> list[dict[str, str]]:
         """The team's own rules that apply to this change, ready for the prompt."""
@@ -618,10 +641,17 @@ class Reviewer:
             return bool(identities) and identities <= checkpoint.completed.keys()
 
         checkpoint_write_error: str | None = None
+        resumed = len(checkpoint.completed)
+        total_passes = len(plan.units)
         for unit in selected:
             index = plan.units.index(unit) + 1
             piece = unit.changeset
             under_review = {file.path for file in piece.files}
+            scope = _common_prefix(sorted(under_review))
+            detail = f"pass {index}/{total_passes}  {scope}"
+            if resumed:
+                detail += f"  ({resumed} resumed from checkpoint)"
+            self._emit_progress("model-review", detail)
             carried_contracts = [
                 contract
                 for contract in plan.contracts
@@ -811,6 +841,11 @@ class Reviewer:
         log.info(message)
         if self.preflight is not None:
             self.preflight(message)
+
+    def _emit_progress(self, stage: str, detail: str) -> None:
+        log.info("%s: %s", stage, detail)
+        if self.progress is not None:
+            self.progress(stage, detail)
 
     def _reconciliation_prompt(
         self,

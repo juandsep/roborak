@@ -165,8 +165,8 @@ export const GLOBAL_FLAGS: FlagGroup[] = [
   {
     title: "Global options",
     flags: [
-      { name: "--verbose, -v", help: "Show debug logging." },
-      { name: "--quiet, -q", help: "Errors only." },
+      { name: "--verbose, -v", help: "-v shows INFO logs; -vv adds DEBUG." },
+      { name: "--quiet, -q", help: "Errors only; suppresses the per-stage lines." },
       { name: "--version, -V", help: "Show the version and exit." },
     ],
   },
