@@ -761,7 +761,7 @@ def test_the_cli_pairs_verified_verdicts_back_to_their_threads(repo, monkeypatch
     reviewer = Reviewer(config=config, repo=repo)
 
     resolutions = _resolutions(
-        Console(),
+        shared.StageLog(Console(), quiet=True),
         session,
         reviewer,
         ReviewResult(),
@@ -796,7 +796,11 @@ def test_the_cli_asks_nothing_when_there_are_no_open_threads(repo):
 
     assert (
         _resolutions(
-            Console(), session, Reviewer(config=config, repo=repo), ReviewResult(), RemoteState()
+            shared.StageLog(Console(), quiet=True),
+            session,
+            Reviewer(config=config, repo=repo),
+            ReviewResult(),
+            RemoteState(),
         )
         == ()
     )

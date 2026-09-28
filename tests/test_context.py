@@ -633,6 +633,70 @@ def test_preflight_reports_exact_passes_before_the_first_call(tmp_path: Path) ->
     assert result.review_budget.estimated_passes == 3
 
 
+def test_progress_reports_each_pass_position(tmp_path: Path) -> None:
+    """A chunked review emits a per-pass ``model-review`` event for every pass it runs."""
+    from roborak.analysis.reviewer import Reviewer
+    from roborak.llm.client import LLMResponse
+    from tests.test_pipeline import StubLLM, uninvestigated
+
+    class Recording(StubLLM):
+        def complete(self, system: str, user: str) -> LLMResponse:
+            return LLMResponse(text="findings: []", model="stub")
+
+    events: list[tuple[str, str]] = []
+    config = uninvestigated()
+    config.review.max_chunks = 3
+    Reviewer(
+        config=config,
+        repo=tmp_path,
+        llm=Recording(reply="", context_budget=140),
+        progress=lambda stage, detail: events.append((stage, detail)),
+    ).review(ChangeSet(files=[make_file(f"pkg{i}/f.py", 30) for i in range(3)]))
+
+    passes = [detail for stage, detail in events if stage == "model-review"]
+    assert any(detail.startswith("pass 1/3") for detail in passes)
+    assert any(detail.startswith("pass 3/3") for detail in passes)
+
+
+def test_progress_notes_passes_resumed_from_a_checkpoint(tmp_path: Path) -> None:
+    """After a partial run, the next run's progress lines say how many passes it resumed."""
+    from roborak.analysis.reviewer import Reviewer
+    from roborak.llm.client import LLMResponse
+    from roborak.state.store import StateStore
+    from tests.test_pipeline import StubLLM, uninvestigated
+
+    class Recording(StubLLM):
+        def complete(self, system: str, user: str) -> LLMResponse:
+            return LLMResponse(text="findings: []", model="stub")
+
+    def fresh() -> ChangeSet:
+        # A new changeset each run: `compress` mutates it, and a reused one would
+        # shrink below the chunking threshold on the second pass.
+        return ChangeSet(files=[make_file(f"pkg{i}/f.py", 30) for i in range(3)])
+
+    def run(max_chunks: int, sink: list[tuple[str, str]] | None) -> None:
+        config = uninvestigated()
+        config.review.max_chunks = max_chunks
+        Reviewer(
+            config=config,
+            repo=tmp_path,
+            llm=Recording(reply="", context_budget=140),
+            checkpoint_store=StateStore(tmp_path),
+            checkpoint_key="local:test",
+            progress=(
+                (lambda stage, detail: sink.append((stage, detail))) if sink is not None else None
+            ),
+        ).review(fresh())
+
+    run(2, None)  # complete two of the three passes and checkpoint them
+    events: list[tuple[str, str]] = []
+    run(3, events)  # resume: the remaining pass runs, with two already done
+
+    passes = [detail for stage, detail in events if stage == "model-review"]
+    assert passes
+    assert all("resumed from checkpoint" in detail for detail in passes)
+
+
 def test_too_little_effective_diff_budget_fails_before_a_model_call(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

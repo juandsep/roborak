@@ -22,6 +22,7 @@ from roborak.core.models import (
     ReviewResult,
     ReviewStatus,
     VerificationReport,
+    VerificationStatus,
     Walkthrough,
 )
 from roborak.core.severity import Severity
@@ -205,7 +206,11 @@ def review(
     ] = None,
 ) -> None:
     """Review changes and report findings."""
-    console = Console(stderr=True, quiet=as_json or agent or prompt_only)
+    cli = shared.cli_context()
+    machine_mode = as_json or agent or prompt_only
+    console = cli.console
+    console.quiet = machine_mode
+    stages = shared.StageLog(console, quiet=machine_mode or cli.quiet)
 
     if post and not (mr or pr or issue):
         fail(console, "--post needs --mr or --pr; there is nowhere to post a local review.")
@@ -225,7 +230,8 @@ def review(
         profile=profile,
         model=model,
         no_llm=no_llm,
-        quiet_status=as_json or agent or prompt_only,
+        quiet_status=machine_mode,
+        stages=stages,
     )
 
     if post and session.target is None:
@@ -271,13 +277,17 @@ def review(
 
     static_findings: list[Finding] = []
     if config.static.enabled and session.changeset.origin in {"local", "paths"}:
-        with console.status("[dim]running static analysis…[/]", spinner="dots"):
+        with stages.stage("static analysis") as st:
             runner = StaticRunner(
                 repo=session.repo,
                 config=config.static,
                 report_findings_enabled=supply_chain is not None,
             )
             static_findings = runner.run(session.changeset)
+            detail = f"{len(runner.ran)} tools, {len(static_findings)} findings on changed lines"
+            if runner.skipped:
+                detail = f"{detail}, {len(runner.skipped)} skipped"
+            st.detail = detail
         note_skipped_scanners(supply_chain, [(tool.name, tool.reason) for tool in runner.skipped])
         attach_scanner_findings(
             supply_chain,
@@ -285,12 +295,11 @@ def review(
             max_findings=config.review.max_findings,
         )
     elif config.static.enabled:
-        log.debug(
-            "skipping static analysis: %s changes are not checked out", session.changeset.origin
-        )
+        with stages.stage("static analysis") as st:
+            st.skip(f"{session.changeset.origin} changes are not checked out")
 
     verification = _verify(
-        console,
+        stages,
         session,
         config_path=config_path,
         profile=profile,
@@ -309,12 +318,16 @@ def review(
         forge_token=session.token,
         checkpoint_store=StateStore(session.repo),
         checkpoint_key=checkpoint_key(session.changeset),
-        preflight=lambda message: console.print(f"[dim]{message}[/]", highlight=False),
     )
 
     status = f"reviewing with {config.model}…" if session.llm else "collecting findings…"
-    with console.status(f"[dim]{status}[/]", spinner="dots"):
+    with stages.stage("model review", spinner_text=status) as st:
+        # The reviewer announces its own budget and per-pass position from inside
+        # `review()`; both feed the one live spinner rather than scrolling the log.
+        reviewer.preflight = st.progress
+        reviewer.progress = lambda _stage, detail: st.progress(detail)
         result = reviewer.review(session.changeset)
+        st.detail = _model_review_detail(result, session.llm is not None)
 
     # Record the floor before anything renders or publishes: every surface reads
     # its verdict off the result, which is what keeps the three from disagreeing.
@@ -339,8 +352,12 @@ def review(
 
     if config.output.walkthrough and session.llm is not None and not session.changeset.is_empty:
         if overview.generate:
-            with console.status("[dim]writing the overview…[/]", spinner="dots"):
+            with stages.stage("overview", spinner_text="writing the overview…") as st:
                 result.walkthrough = reviewer.walkthrough(session.changeset)
+                if result.walkthrough is not None:
+                    st.detail = "written"
+                else:
+                    st.skip("no overview produced")
             reviewer.apply_usage(result)
         else:
             result.walkthrough = overview.cached
@@ -350,7 +367,7 @@ def review(
     resolutions: tuple[Resolution, ...] = ()
     if publishing and not repost:
         assert session.target is not None and remote is not None
-        resolutions = _resolutions(console, session, reviewer, result, remote)
+        resolutions = _resolutions(stages, session, reviewer, result, remote)
 
     if publishing:
         assert session.target is not None and session.token is not None and remote is not None
@@ -367,6 +384,7 @@ def review(
             remote=remote,
             overview=overview,
             resolutions=resolutions,
+            stages=stages,
         )
 
     shared.emit(
@@ -380,22 +398,25 @@ def review(
         full=config.output.full,
     )
 
+    stages.summary(result)
+
     if not post:
         _offer_to_share(
             console,
             session,
             result,
-            machine_mode=as_json or agent or prompt_only,
+            machine_mode=machine_mode,
             no_summary=no_summary,
             repost=repost,
             already_written=markdown_out is not None,
+            stages=stages,
         )
 
     shared.finish(result, fail_on)
 
 
 def _verify(
-    console: Console,
+    stages: shared.StageLog,
     session: shared.Session,
     *,
     config_path: Path | None,
@@ -436,8 +457,55 @@ def _verify(
         return None
 
     runner = VerificationRunner(repo=session.repo, config=verification, source=source, notes=notes)
-    with console.status("[dim]verifying with the project's own checks…[/]", spinner="dots"):
-        return runner.run(changeset)
+    spinner = "verifying with the project's own checks…"
+    with stages.stage("verification", spinner_text=spinner) as st:
+        report = runner.run(changeset)
+        if report is not None:
+            _mark_verification(st, report)
+        return report
+
+
+def _mark_verification(st: shared.Stage, report: VerificationReport) -> None:
+    """Set the stage outcome from the report: a machine problem warns, a suite that
+    failed fails, and everything else is a clean pass with a count."""
+    status = report.status
+    ran = sum(1 for run in report.runs if run.executed)
+    if status is VerificationStatus.PASSED:
+        st.detail = f"{ran} command(s) passed"
+    elif status is VerificationStatus.SKIPPED:
+        st.detail = "nothing to run"
+    elif status is VerificationStatus.ERRORED:
+        errored = sum(1 for run in report.runs if run.status is VerificationStatus.ERRORED)
+        st.skip(f"could not run {errored} command(s)")
+    else:  # FAILED or TIMED_OUT: a statement about the change, worth the eye
+        st.fail(f"{len(report.failing)} of {ran} command(s) failed")
+
+
+def _model_review_detail(result: ReviewResult, has_llm: bool) -> str:
+    """What the model-review stage line reports once ``review()`` returns.
+
+    Folds the investigation counts in rather than opening a second stage: the
+    investigation runs inside ``review()``, so timing it separately would double
+    the same clock. ``--no-llm`` collects static findings only and says so."""
+    if not has_llm:
+        return f"{len(result.findings)} finding(s), no model calls"
+
+    parts: list[str] = []
+    budget = result.review_budget
+    if budget is not None and budget.estimated_passes > 1:
+        run = result.review_plan.run_chunks if result.review_plan else 0
+        parts.append(f"{run}/{budget.estimated_passes} passes")
+    else:
+        parts.append("1 pass")
+    parts.append(f"{len(result.findings)} finding(s)")
+
+    inv = result.investigation
+    if inv is not None and inv.settled:
+        confirmed = sum(1 for d in inv.decisions if d.disposition == "confirm")
+        revised = sum(1 for d in inv.decisions if d.disposition == "revise")
+        dropped = sum(1 for d in inv.decisions if d.disposition == "drop")
+        parts.append(f"investigated {confirmed} confirmed, {revised} revised, {dropped} dropped")
+    return ", ".join(parts)
 
 
 def _seen_fingerprints(repo: Path, target: Target, *, repost: bool) -> frozenset[str]:
@@ -543,7 +611,7 @@ def _cached_walkthrough(session: shared.Session) -> Walkthrough | None:
 
 
 def _resolutions(
-    console: Console,
+    stages: shared.StageLog,
     session: shared.Session,
     reviewer: Reviewer,
     result: ReviewResult,
@@ -570,12 +638,16 @@ def _resolutions(
     )
     fallback = StateStore(session.repo).get(key).last_head_sha
 
-    with console.status("[dim]checking which findings later commits fixed…[/]", spinner="dots"):
+    with stages.stage(
+        "resolution", spinner_text="checking which findings later commits fixed…"
+    ) as st:
         verdicts = reviewer.verify_fixes(
             list(remote.open_threads),
             session.changeset,
             fallback_base=fallback,
         )
+        fixed = sum(1 for v in verdicts if v.attributable)
+        st.detail = f"{fixed} of {len(remote.open_threads)} open thread(s) fixed"
     reviewer.apply_usage(result)
 
     by_key = {thread.key: thread for thread in remote.open_threads}
@@ -597,6 +669,7 @@ def _publish(
     post_summary: bool,
     post_check: bool,
     repost: bool,
+    stages: shared.StageLog,
     remote: RemoteState | None = None,
     overview: _Overview | None = None,
     resolutions: tuple[Resolution, ...] = (),
@@ -623,8 +696,9 @@ def _publish(
     )
 
     try:
-        with console.status("[dim]posting review…[/]", spinner="dots"):
+        with stages.stage("posting") as st:
             report = publisher.publish(result)
+            st.detail = f"{len(report.posted)} comment(s), {len(report.resolved)} resolved"
     except SourceError as exc:
         console.print(f"[bold red]could not post review[/] {exc}")
         result.status = ReviewStatus.PARTIAL
@@ -690,6 +764,7 @@ def _offer_to_share(
     no_summary: bool,
     repost: bool,
     already_written: bool,
+    stages: shared.StageLog,
 ) -> None:
     """Ask, once the report is on screen, what to do with it.
 
@@ -743,6 +818,7 @@ def _offer_to_share(
             post_summary=not no_summary,
             post_check=session.config.output.post_check,
             repost=repost,
+            stages=stages,
         )
     elif answer == "s" and can_save:
         _save(console, result, suggested=DEFAULT_REPORT_NAME)

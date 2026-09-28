@@ -14,7 +14,7 @@ from typer.testing import CliRunner
 
 from roborak import __version__
 from roborak.cli.main import app
-from roborak.cli.shared import EXIT_ERROR, EXIT_FINDINGS, EXIT_OK, _load_paths
+from roborak.cli.shared import EXIT_ERROR, EXIT_FINDINGS, EXIT_OK, StageLog, _load_paths
 from roborak.publish.base import RemoteState
 
 runner = CliRunner()
@@ -96,6 +96,136 @@ def test_no_llm_with_changes_exits_clean(repo: Path):
     assert "No findings" in flatten(result.output)
 
 
+def _staged(*, quiet: bool, terminal: bool):
+    """A ``StageLog`` writing to a captured console, plus the buffer it writes to."""
+    import io
+
+    from rich.console import Console
+
+    buffer = io.StringIO()
+    console = Console(file=buffer, force_terminal=terminal, width=80)
+    return StageLog(console, quiet=quiet), buffer
+
+
+def test_stagelog_records_outcome_and_duration():
+    log, buffer = _staged(quiet=False, terminal=False)
+    with log.stage("static analysis") as st:
+        st.detail = "3 tools, 2 findings"
+    text = buffer.getvalue()
+    assert "✓" in text
+    assert "static analysis" in text
+    assert "3 tools, 2 findings" in text
+    assert "s" in text  # a duration column, e.g. 0.0s
+
+
+def test_stagelog_skip_and_fail_marks():
+    log, buffer = _staged(quiet=False, terminal=False)
+    with log.stage("supply chain") as st:
+        st.skip("bwrap missing")
+    with log.stage("verification") as st:
+        st.fail("1 of 2 failed")
+    text = buffer.getvalue()
+    assert "⚠" in text and "bwrap missing" in text
+    assert "✗" in text and "1 of 2 failed" in text
+
+
+def test_stagelog_marks_an_uncaught_error_as_failed():
+    log, buffer = _staged(quiet=False, terminal=False)
+    with pytest.raises(RuntimeError), log.stage("model review"):
+        raise RuntimeError("boom")
+    assert "✗" in buffer.getvalue()
+    assert log.stages[-1].status == "fail"
+
+
+def test_stagelog_quiet_writes_nothing():
+    log, buffer = _staged(quiet=True, terminal=False)
+    with log.stage("static analysis") as st:
+        st.detail = "whatever"
+    assert buffer.getvalue() == ""
+
+
+def test_stagelog_summary_lists_skips_and_failures():
+    log, buffer = _staged(quiet=False, terminal=False)
+    with log.stage("static analysis"):
+        pass
+    with log.stage("verification") as st:
+        st.skip("no runner")
+    with log.stage("posting") as st:
+        st.fail("network")
+    buffer.truncate(0)
+    buffer.seek(0)
+    log.summary()
+    text = buffer.getvalue()
+    assert "3 stage(s)" in text
+    assert "skipped: verification" in text
+    assert "failed: posting" in text
+
+
+def test_stagelog_terminal_mode_animates_a_spinner():
+    """On a terminal the stage runs a live spinner and still leaves its final line."""
+    log, buffer = _staged(quiet=False, terminal=True)
+    with log.stage("model review") as st:
+        st.progress("pass 1/3")  # updating the live spinner must not raise
+        st.detail = "done"
+    text = flatten(buffer.getvalue())
+    assert "model review" in text
+    assert "done" in text
+
+
+def test_stage_lines_land_on_stderr_never_stdout(repo: Path):
+    """stdout is the product; the stage record is chrome and belongs on stderr."""
+    (repo / "app.py").write_text("def f():\n    return 2\n")
+    result = runner.invoke(app, ["review", "--no-llm", "--uncommitted", "-C", str(repo)])
+    assert result.exit_code == EXIT_OK
+    assert "static analysis" in result.stderr
+    assert "✓" in result.stderr
+    assert "✓" not in result.stdout
+    assert "static analysis" not in result.stdout
+
+
+def test_non_tty_stage_lines_carry_no_ansi(repo: Path):
+    """Off a terminal (a pipe, CI) the lines are plain text with no control codes."""
+    (repo / "app.py").write_text("def f():\n    return 2\n")
+    result = runner.invoke(app, ["review", "--no-llm", "--uncommitted", "-C", str(repo)])
+    assert "static analysis" in result.stderr
+    assert "\x1b[" not in result.stderr
+
+
+def test_quiet_suppresses_stage_lines(repo: Path):
+    (repo / "app.py").write_text("def f():\n    return 2\n")
+    result = runner.invoke(app, ["-q", "review", "--no-llm", "--uncommitted", "-C", str(repo)])
+    assert result.exit_code == EXIT_OK
+    assert "static analysis" not in result.stderr
+    assert "✓" not in result.stderr
+
+
+def test_machine_mode_keeps_stdout_pure_and_stages_silent(repo: Path):
+    """``--json`` puts only the payload on stdout and no stage chrome anywhere."""
+    (repo / "app.py").write_text("def f():\n    return 2\n")
+    result = runner.invoke(app, ["review", "--no-llm", "--uncommitted", "--json", "-C", str(repo)])
+    assert result.exit_code == EXIT_OK
+    json.loads(result.stdout)  # stdout is nothing but the JSON payload
+    assert "✓" not in result.stderr
+    assert "static analysis" not in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [
+        ([], "WARNING"),
+        (["-v"], "INFO"),
+        (["-vv"], "DEBUG"),
+        (["-q"], "ERROR"),
+    ],
+)
+def test_verbosity_flags_set_the_log_level(repo: Path, flags: list[str], expected: str):
+    import logging
+
+    result = runner.invoke(app, [*flags, "review", "--no-llm", "--uncommitted", "-C", str(repo)])
+    assert result.exit_code == EXIT_OK
+    assert logging.getLogger().level == getattr(logging, expected)
+
+
 def test_a_plain_directory_is_reviewed_file_by_file(tmp_path: Path):
     """The point of the fallback: no repository, no baseline, still a review."""
     plain = tmp_path / "plain"
@@ -146,15 +276,16 @@ def test_ignored_noise_does_not_spend_a_plain_directory_review_budget(tmp_path: 
     (plain / "bundle.min.js").write_text("var a=1;\n")
     (plain / "uv.lock").write_text("version = 1\n")
 
+    console = Console()
     changeset = _load_paths(
-        Console(),
+        console,
         plain,
         ignore_paths=list(DEFAULT_IGNORE_PATHS),
         base=None,
         committed=False,
         uncommitted=False,
         include_untracked=False,
-        quiet=True,
+        stages=StageLog(console, quiet=True),
     )
     paths = {file.path for file in changeset.files}
     assert "bundle.min.js" not in paths

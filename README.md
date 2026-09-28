@@ -168,6 +168,20 @@ uv run roborak review --no-investigate      # skip the evidence-gathering stage
 | `1` | Findings at or above `--fail-on` |
 | `2` | Operational error or partial review - failed chunks, unavailable forge patches, or a requested publish that did not complete |
 
+**Run output and verbosity**
+
+Each stage of a review (static analysis, verification, the model passes, the overview,
+posting) leaves a line on stderr with its outcome and how long it took, and a chunked
+model review shows its per-pass position while it runs. stdout stays the report alone, so
+`--json`, `--markdown` and a plain pipe are unaffected.
+
+```bash
+uv run roborak review            # stage lines and warnings on stderr
+uv run roborak -v review         # add INFO logs (e.g. how many passes a change needs)
+uv run roborak -vv review        # add DEBUG logs
+uv run roborak -q review         # errors only: no stage lines
+```
+
 ### The pre-merge check
 
 Every review ends with a pre-merge check: the verdict, the severity floor it was judged

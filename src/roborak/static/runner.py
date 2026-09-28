@@ -73,10 +73,18 @@ class StaticRunner:
     report_findings: list[Finding] = field(default_factory=list)
     """Whole-asset findings routed to a stage report rather than an inline line."""
 
+    ran: list[str] = field(default_factory=list)
+    """Adapters that actually executed this run, populated by ``run``.
+
+    Distinct from what was selected: an adapter can be selected, find no applicable
+    files, or be missing, and never run. The CLI reports this count so a stage line
+    states how many tools looked, not how many might have."""
+
     def run(self, changeset: ChangeSet) -> list[Finding]:
         """Every applicable adapter over the changed files, narrowed to the changed lines."""
         self.skipped.clear()
         self.report_findings.clear()
+        self.ran.clear()
         if not self.config.enabled or self.config.execution is StaticExecution.OFF:
             return []
 
@@ -106,6 +114,7 @@ class StaticRunner:
                 log.debug("skipping %s: %s", adapter.name, reason)
                 continue
             produced = self._run_one(adapter, applicable, sandboxed=sandboxed)
+            self.ran.append(adapter.name)
             if adapter.report_only:
                 self.report_findings.extend(produced)
             else:
