@@ -44,6 +44,7 @@ class PublishReport:
 
         self.summary_posted = False
         self.summary_updated = False
+        self.summary_url: str | None = None
         """An overview roborak had already published was edited in place rather
         than a second one appended beside it."""
 
