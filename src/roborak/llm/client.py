@@ -92,7 +92,7 @@ class LLMClient:
         completion_tokens = getattr(usage, "completion_tokens", None)
         hidden = getattr(response, "_hidden_params", None) or {}
         raw_cost = hidden.get("response_cost") if isinstance(hidden, dict) else None
-        return LLMResponse(
+        result = LLMResponse(
             text=text if text is not None else "",
             finish_reason=getattr(response.choices[0], "finish_reason", None),
             model=model,
@@ -101,6 +101,10 @@ class LLMClient:
             latency_ms=round((time.monotonic() - started) * 1000),
             cost_usd=float(raw_cost) if isinstance(raw_cost, int | float) else None,
         )
+        if not result.text.strip():
+            reason = result.finish_reason or "unknown"
+            raise LLMError(f"{model} returned no text (finish_reason: {reason})")
+        return result
 
     def _key_for(self, model: str) -> str | None:
         """The configured key for this model's provider, if there is one.

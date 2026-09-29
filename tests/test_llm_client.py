@@ -140,14 +140,48 @@ def test_valid_finish_reason_preserved(client, monkeypatch, finish_reason):
         "completion",
         lambda **kwargs: SimpleNamespace(
             choices=[
-                SimpleNamespace(message=SimpleNamespace(content=None), finish_reason=finish_reason)
+                SimpleNamespace(message=SimpleNamespace(content="ok"), finish_reason=finish_reason)
             ]
         ),
     )
     response = instance.complete("sys", "user")
     assert response.finish_reason == finish_reason
-    assert response.text == ""
+    assert response.text == "ok"
     assert response.total_tokens == 0
+
+
+@pytest.mark.parametrize("content", [None, "", "  \n"])
+def test_empty_model_reply_uses_fallback(client, monkeypatch, content):
+    instance, fake = client(LLMConfig(model="primary", fallback_models=["fallback"]))
+    completion = fake.completion
+
+    def respond(**kwargs):
+        response = completion(**kwargs)
+        if kwargs["model"] == "primary":
+            response.choices[0].message.content = content
+            response.choices[0].finish_reason = "length"
+        return response
+
+    monkeypatch.setattr(fake, "completion", respond)
+    response = instance.complete("sys", "user")
+
+    assert response.model == "fallback"
+    assert response.text == "ok"
+    assert [call["model"] for call in fake.calls] == ["primary", "fallback"]
+
+
+def test_empty_reply_without_fallback_fails_review(client, monkeypatch):
+    instance, fake = client(LLMConfig(model="primary"))
+    monkeypatch.setattr(
+        fake,
+        "completion",
+        lambda **kwargs: SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=""), finish_reason="length")]
+        ),
+    )
+
+    with pytest.raises(LLMError, match=r"returned no text.*finish_reason: length"):
+        instance.complete("sys", "user")
 
 
 @pytest.mark.parametrize(
