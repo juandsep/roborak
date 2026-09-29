@@ -7,11 +7,22 @@ from dataclasses import dataclass
 from roborak.core.models import ReviewResult
 from roborak.core.verdict import Verdict, gate_for
 from roborak.publish.base import _author, _viewer, _written_at
+from roborak.render.markdown import LOGO_URL
 from roborak.sources.base import SourceError
 from roborak.sources.discussion import is_bot
 from roborak.sources.forge import ForgeClient, Target
 
 MARKER = "<!-- roborak:review-progress -->"
+
+
+def _initial_body() -> str:
+    return (
+        "### 🔎 Review in progress\n\n"
+        "roborak is reviewing this change. "
+        "This comment will be updated when the review is complete.\n\n"
+        f'<sub><img src="{LOGO_URL}" width="14" align="top"> <b>roborak</b></sub>'
+        f"\n\n{MARKER}"
+    )
 
 
 @dataclass(frozen=True)
@@ -56,10 +67,10 @@ def start(target: Target, token: str) -> ProgressRef:
 
         if candidates:
             ref = max(candidates, key=lambda found: found[:2])[2]
-            _edit(client, ref, f"roborak is reviewing this change.\n\n{MARKER}")
+            _edit(client, ref, _initial_body())
             return ref
 
-        answer = client.post(list_path, {"body": f"roborak is reviewing this change.\n\n{MARKER}"})
+        answer = client.post(list_path, {"body": _initial_body()})
         identifier = answer.get("id") if isinstance(answer, dict) else None
         if not isinstance(identifier, int):
             raise SourceError("The forge did not return an id for the review progress comment.")

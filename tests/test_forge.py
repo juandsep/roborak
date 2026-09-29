@@ -179,6 +179,7 @@ def client_with(handler, target: Target) -> ForgeClient:
 @pytest.mark.parametrize("provider", ["github", "gitlab"])
 def test_review_progress_is_created_then_reused_and_completed(monkeypatch, provider):
     from roborak.publish import progress
+    from roborak.render.markdown import LOGO_URL
 
     target = Target(provider, f"{provider}.com", "acme/web", 42)
     notes: list[dict[str, object]] = []
@@ -212,8 +213,14 @@ def test_review_progress_is_created_then_reused_and_completed(monkeypatch, provi
     ref = progress.start(target, "tok")
     assert ref.edit_path.endswith("/7")
     assert writes[0][0] == "POST"
-    assert "reviewing" in writes[0][1]
-    assert progress.MARKER in writes[0][1]
+    initial_body = (
+        "### 🔎 Review in progress\n\n"
+        "roborak is reviewing this change. "
+        "This comment will be updated when the review is complete.\n\n"
+        f'<sub><img src="{LOGO_URL}" width="14" align="top"> <b>roborak</b></sub>'
+        f"\n\n{progress.MARKER}"
+    )
+    assert writes[0][1] == initial_body
 
     result = ReviewResult()
     progress.finish(target, "tok", ref, result, "https://example.test/summary")
@@ -227,6 +234,7 @@ def test_review_progress_is_created_then_reused_and_completed(monkeypatch, provi
 
     assert progress.start(target, "tok") == ref
     assert [method for method, _ in writes] == ["POST", ref.method, ref.method, ref.method]
+    assert writes[-1][1] == initial_body
     progress.finish(target, "tok", ref, None)
     assert "did not complete" in writes[-1][1]
 
