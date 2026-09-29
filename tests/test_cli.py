@@ -20,6 +20,18 @@ from roborak.publish.base import RemoteState
 runner = CliRunner()
 
 
+@pytest.fixture(autouse=True)
+def stub_review_progress(monkeypatch):
+    """CLI fixtures fake forge sources and publishers, so fake progress too."""
+    from roborak.publish.progress import ProgressRef
+
+    monkeypatch.setattr(
+        "roborak.cli.commands.review.start_progress",
+        lambda target, token: ProgressRef("/progress/1", "PATCH"),
+    )
+    monkeypatch.setattr("roborak.cli.commands.review.finish_progress", lambda *args: None)
+
+
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -1454,6 +1466,94 @@ def _mr_session(monkeypatch):
     monkeypatch.setattr("roborak.cli.commands.review.GitLabPublisher", FakePublisher)
     _make_interactive(monkeypatch)
     return built
+
+
+def test_explicit_post_tracks_review_from_before_analysis_to_completion(repo: Path, monkeypatch):
+    from roborak.analysis.reviewer import Reviewer
+    from roborak.core.models import ReviewResult
+    from roborak.publish.progress import ProgressRef
+
+    _mr_session(monkeypatch)
+    events: list[tuple[str, object]] = []
+    ref = ProgressRef("/progress/1", "PATCH")
+    monkeypatch.setattr(
+        "roborak.cli.commands.review.start_progress",
+        lambda target, token: events.append(("start", target.provider)) or ref,
+    )
+    monkeypatch.setattr(
+        Reviewer,
+        "review",
+        lambda self, cs: events.append(("analysis", cs.origin)) or ReviewResult(changeset=cs),
+    )
+    monkeypatch.setattr(
+        "roborak.cli.commands.review.finish_progress",
+        lambda target, token, got_ref, result, summary_url=None: events.append(
+            ("finish", result is not None)
+        ),
+    )
+
+    outcome = runner.invoke(app, ["review", "--no-llm", "--mr", MR_URL, "--post", "-C", str(repo)])
+
+    assert outcome.exit_code == EXIT_OK, outcome.output
+    assert events == [("start", "gitlab"), ("analysis", "gitlab"), ("finish", True)]
+
+
+def test_explicit_post_marks_progress_failed_when_analysis_raises(repo: Path, monkeypatch):
+    from roborak.analysis.reviewer import Reviewer
+    from roborak.publish.progress import ProgressRef
+
+    _mr_session(monkeypatch)
+    finished: list[object] = []
+    monkeypatch.setattr(
+        "roborak.cli.commands.review.start_progress",
+        lambda target, token: ProgressRef("/progress/1", "PATCH"),
+    )
+
+    def fail_review(self, changeset):
+        raise RuntimeError("model unavailable")
+
+    monkeypatch.setattr(Reviewer, "review", fail_review)
+    monkeypatch.setattr(
+        "roborak.cli.commands.review.finish_progress",
+        lambda target, token, ref, result, summary_url=None: finished.append(result),
+    )
+
+    outcome = runner.invoke(app, ["review", "--no-llm", "--mr", MR_URL, "--post", "-C", str(repo)])
+
+    assert isinstance(outcome.exception, RuntimeError)
+    assert finished == [None]
+
+
+def test_progress_post_failure_does_not_skip_analysis(repo: Path, monkeypatch):
+    from roborak.sources.base import SourceError
+
+    built = _mr_session(monkeypatch)
+
+    def fail_progress(target, token):
+        raise SourceError("comment refused")
+
+    monkeypatch.setattr("roborak.cli.commands.review.start_progress", fail_progress)
+    outcome = runner.invoke(app, ["review", "--no-llm", "--mr", MR_URL, "--post", "-C", str(repo)])
+
+    assert outcome.exit_code == EXIT_ERROR
+    assert built["published"] is True
+    assert "could not post review progress" in flatten(outcome.output)
+
+
+def test_progress_update_failure_is_reported_after_publishing(repo: Path, monkeypatch):
+    from roborak.sources.base import SourceError
+
+    built = _mr_session(monkeypatch)
+
+    def fail_update(target, token, ref, result, summary_url=None):
+        raise SourceError("edit refused")
+
+    monkeypatch.setattr("roborak.cli.commands.review.finish_progress", fail_update)
+    outcome = runner.invoke(app, ["review", "--no-llm", "--mr", MR_URL, "--post", "-C", str(repo)])
+
+    assert outcome.exit_code == EXIT_ERROR
+    assert built["published"] is True
+    assert "could not update review progress" in flatten(outcome.output)
 
 
 def test_the_prompt_previews_what_it_would_post(repo: Path, monkeypatch):

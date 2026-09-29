@@ -176,6 +176,102 @@ def client_with(handler, target: Target) -> ForgeClient:
     return client
 
 
+@pytest.mark.parametrize("provider", ["github", "gitlab"])
+def test_review_progress_is_created_then_reused_and_completed(monkeypatch, provider):
+    from roborak.publish import progress
+    from roborak.render.markdown import LOGO_URL
+
+    target = Target(provider, f"{provider}.com", "acme/web", 42)
+    notes: list[dict[str, object]] = []
+    writes: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/user"):
+            key = "login" if provider == "github" else "username"
+            return httpx.Response(200, json={key: "review-bot"})
+        if request.method == "GET":
+            return httpx.Response(200, json=notes)
+        body = json.loads(request.content)["body"]
+        writes.append((request.method, body))
+        if request.method == "POST":
+            notes.append(
+                {
+                    "id": 7,
+                    "body": body,
+                    "user": {"login": "review-bot"},
+                    "author": {"username": "review-bot"},
+                }
+            )
+            return httpx.Response(201, json={"id": 7})
+        notes[0]["body"] = body
+        return httpx.Response(200, json={"id": 7})
+
+    monkeypatch.setattr(
+        "roborak.publish.progress.ForgeClient", lambda t, tok: client_with(handler, t)
+    )
+    ref = progress.start(target, "tok")
+    assert ref.edit_path.endswith("/7")
+    assert writes[0][0] == "POST"
+    initial_body = (
+        "### 🔎 Review in progress\n\n"
+        "roborak is reviewing this change. "
+        "This comment will be updated when the review is complete.\n\n"
+        f'<sub><img src="{LOGO_URL}" width="14" align="top"> <b>roborak</b></sub>'
+        f"\n\n{progress.MARKER}"
+    )
+    assert writes[0][1] == initial_body
+
+    result = ReviewResult()
+    progress.finish(target, "tok", ref, result, "https://example.test/summary")
+    assert "review is complete" in writes[1][1]
+    assert "https://example.test/summary" in writes[1][1]
+    assert "reviewing this change" not in writes[1][1]
+
+    progress.finish(target, "tok", ref, result)
+    assert "No findings" in writes[2][1]
+    assert "Read the review summary" not in writes[2][1]
+
+    assert progress.start(target, "tok") == ref
+    assert [method for method, _ in writes] == ["POST", ref.method, ref.method, ref.method]
+    assert writes[-1][1] == initial_body
+    progress.finish(target, "tok", ref, None)
+    assert "did not complete" in writes[-1][1]
+
+
+@pytest.mark.parametrize("provider", ["github", "gitlab"])
+def test_review_progress_does_not_reuse_a_contributors_copy(monkeypatch, provider):
+    from roborak.publish import progress
+
+    target = Target(provider, f"{provider}.com", "acme/web", 42)
+    methods: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        methods.append(request.method)
+        if request.url.path.endswith("/user"):
+            key = "login" if provider == "github" else "username"
+            return httpx.Response(200, json={key: "review-bot"})
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": 3,
+                        "body": progress.MARKER,
+                        "user": {"login": "contributor"},
+                        "author": {"username": "contributor"},
+                    }
+                ],
+            )
+        return httpx.Response(201, json={"id": 8})
+
+    monkeypatch.setattr(
+        "roborak.publish.progress.ForgeClient", lambda t, tok: client_with(handler, t)
+    )
+    assert progress.start(target, "tok").edit_path.endswith("/8")
+    assert methods[-1] == "POST"
+
+
 @pytest.mark.parametrize(
     ("status", "fragment"),
     [

@@ -35,6 +35,8 @@ from roborak.publish.base import (
 )
 from roborak.publish.github import GitHubPublisher
 from roborak.publish.gitlab import GitLabPublisher
+from roborak.publish.progress import finish as finish_progress
+from roborak.publish.progress import start as start_progress
 from roborak.render import markdown
 from roborak.sources.base import SourceError
 from roborak.sources.forge import Target
@@ -270,123 +272,163 @@ def review(
     if full:
         config.output.full = True
 
-    # Runs before the reviewer, on the changeset as the source produced it. By the
-    # time `Reviewer._prepare` is done, `ignore_paths` has removed every lockfile
-    # in it -- which is correct for the prompt and fatal for this analysis.
-    supply_chain = analyse_supply_chain(session.changeset, session.repo, config.supply_chain)
+    progress_ref = None
+    progress_error: str | None = None
+    if post and session.target is not None and session.token is not None:
+        try:
+            progress_ref = start_progress(session.target, session.token)
+        except SourceError as exc:
+            progress_error = f"could not post review progress: {exc}"
+            console.print(f"[yellow]{progress_error}[/]")
 
-    static_findings: list[Finding] = []
-    if config.static.enabled and session.changeset.origin in {"local", "paths"}:
-        with stages.stage("static analysis") as st:
-            runner = StaticRunner(
-                repo=session.repo,
-                config=config.static,
-                report_findings_enabled=supply_chain is not None,
+    progress_closed = False
+    result: ReviewResult | None = None
+    summary_url: str | None = None
+
+    try:
+        # Runs before the reviewer, on the changeset as the source produced it. By the
+        # time `Reviewer._prepare` is done, `ignore_paths` has removed every lockfile
+        # in it -- which is correct for the prompt and fatal for this analysis.
+        supply_chain = analyse_supply_chain(session.changeset, session.repo, config.supply_chain)
+
+        static_findings: list[Finding] = []
+        if config.static.enabled and session.changeset.origin in {"local", "paths"}:
+            with stages.stage("static analysis") as st:
+                runner = StaticRunner(
+                    repo=session.repo,
+                    config=config.static,
+                    report_findings_enabled=supply_chain is not None,
+                )
+                static_findings = runner.run(session.changeset)
+                detail = (
+                    f"{len(runner.ran)} tools, {len(static_findings)} findings on changed lines"
+                )
+                if runner.skipped:
+                    detail = f"{detail}, {len(runner.skipped)} skipped"
+                st.detail = detail
+            note_skipped_scanners(
+                supply_chain, [(tool.name, tool.reason) for tool in runner.skipped]
             )
-            static_findings = runner.run(session.changeset)
-            detail = f"{len(runner.ran)} tools, {len(static_findings)} findings on changed lines"
-            if runner.skipped:
-                detail = f"{detail}, {len(runner.skipped)} skipped"
-            st.detail = detail
-        note_skipped_scanners(supply_chain, [(tool.name, tool.reason) for tool in runner.skipped])
-        attach_scanner_findings(
-            supply_chain,
-            runner.report_findings,
-            max_findings=config.review.max_findings,
+            attach_scanner_findings(
+                supply_chain,
+                runner.report_findings,
+                max_findings=config.review.max_findings,
+            )
+        elif config.static.enabled:
+            with stages.stage("static analysis") as st:
+                st.skip(f"{session.changeset.origin} changes are not checked out")
+
+        verification = _verify(
+            stages,
+            session,
+            config_path=config_path,
+            profile=profile,
+            trusted=trust_verify,
+            disabled=no_verify,
         )
-    elif config.static.enabled:
-        with stages.stage("static analysis") as st:
-            st.skip(f"{session.changeset.origin} changes are not checked out")
 
-    verification = _verify(
-        stages,
-        session,
-        config_path=config_path,
-        profile=profile,
-        trusted=trust_verify,
-        disabled=no_verify,
-    )
+        reviewer = Reviewer(
+            config=config,
+            repo=session.repo,
+            llm=session.llm,
+            static_findings=static_findings,
+            verification=verification,
+            supply_chain=supply_chain,
+            issue=session.issue,
+            forge_token=session.token,
+            checkpoint_store=StateStore(session.repo),
+            checkpoint_key=checkpoint_key(session.changeset),
+        )
 
-    reviewer = Reviewer(
-        config=config,
-        repo=session.repo,
-        llm=session.llm,
-        static_findings=static_findings,
-        verification=verification,
-        supply_chain=supply_chain,
-        issue=session.issue,
-        forge_token=session.token,
-        checkpoint_store=StateStore(session.repo),
-        checkpoint_key=checkpoint_key(session.changeset),
-    )
+        status = f"reviewing with {config.model}…" if session.llm else "collecting findings…"
+        with stages.stage("model review", spinner_text=status) as st:
+            # The reviewer announces its own budget and per-pass position from inside
+            # `review()`; both feed the one live spinner rather than scrolling the log.
+            reviewer.preflight = st.progress
+            reviewer.progress = lambda _stage, detail: st.progress(detail)
+            result = reviewer.review(session.changeset)
+            st.detail = _model_review_detail(result, session.llm is not None)
 
-    status = f"reviewing with {config.model}…" if session.llm else "collecting findings…"
-    with stages.stage("model review", spinner_text=status) as st:
-        # The reviewer announces its own budget and per-pass position from inside
-        # `review()`; both feed the one live spinner rather than scrolling the log.
-        reviewer.preflight = st.progress
-        reviewer.progress = lambda _stage, detail: st.progress(detail)
-        result = reviewer.review(session.changeset)
-        st.detail = _model_review_detail(result, session.llm is not None)
+        if progress_error:
+            result.status = ReviewStatus.PARTIAL
+            result.errors.append(progress_error)
 
-    # Record the floor before anything renders or publishes: every surface reads
-    # its verdict off the result, which is what keeps the three from disagreeing.
-    result.block_on = fail_on or config.review.block_on
-    result.block_on_explicit = fail_on is not None
+        # Record the floor before anything renders or publishes: every surface reads
+        # its verdict off the result, which is what keeps the three from disagreeing.
+        result.block_on = fail_on or config.review.block_on
+        result.block_on_explicit = fail_on is not None
 
-    publishing = post and session.target is not None and session.token is not None
-    remote: RemoteState | None = None
-    if publishing:
-        assert session.target is not None and session.token is not None
-        remote = _remote_state(console, session.target, session.token, result, repost=repost)
-        if remote is None:
-            publishing = False
+        publishing = post and session.target is not None and session.token is not None
+        remote: RemoteState | None = None
+        if publishing:
+            assert session.target is not None and session.token is not None
+            remote = _remote_state(console, session.target, session.token, result, repost=repost)
+            if remote is None:
+                publishing = False
 
-    overview = _overview_plan(
-        session,
-        remote,
-        no_summary=no_summary,
-        repost=repost,
-        publishing=publishing,
-    )
-
-    if config.output.walkthrough and session.llm is not None and not session.changeset.is_empty:
-        if overview.generate:
-            with stages.stage("overview", spinner_text="writing the overview…") as st:
-                result.walkthrough = reviewer.walkthrough(session.changeset)
-                if result.walkthrough is not None:
-                    st.detail = "written"
-                else:
-                    st.skip("no overview produced")
-            reviewer.apply_usage(result)
-        else:
-            result.walkthrough = overview.cached
-
-    reviewer.premerge_opinion(result)
-
-    resolutions: tuple[Resolution, ...] = ()
-    if publishing and not repost:
-        assert session.target is not None and remote is not None
-        resolutions = _resolutions(stages, session, reviewer, result, remote)
-
-    if publishing:
-        assert session.target is not None and session.token is not None and remote is not None
-        _publish(
-            console,
-            session.repo,
-            session.target,
-            session.token,
-            result,
-            post_inline=True,
-            post_summary=overview.post_summary,
-            post_check=config.output.post_check,
+        overview = _overview_plan(
+            session,
+            remote,
+            no_summary=no_summary,
             repost=repost,
-            remote=remote,
-            overview=overview,
-            resolutions=resolutions,
-            stages=stages,
+            publishing=publishing,
         )
 
+        if config.output.walkthrough and session.llm is not None and not session.changeset.is_empty:
+            if overview.generate:
+                with stages.stage("overview", spinner_text="writing the overview…") as st:
+                    result.walkthrough = reviewer.walkthrough(session.changeset)
+                    if result.walkthrough is not None:
+                        st.detail = "written"
+                    else:
+                        st.skip("no overview produced")
+                reviewer.apply_usage(result)
+            else:
+                result.walkthrough = overview.cached
+
+        reviewer.premerge_opinion(result)
+
+        resolutions: tuple[Resolution, ...] = ()
+        if publishing and not repost:
+            assert session.target is not None and remote is not None
+            resolutions = _resolutions(stages, session, reviewer, result, remote)
+
+        if publishing:
+            assert session.target is not None and session.token is not None and remote is not None
+            report = _publish(
+                console,
+                session.repo,
+                session.target,
+                session.token,
+                result,
+                post_inline=True,
+                post_summary=overview.post_summary,
+                post_check=config.output.post_check,
+                repost=repost,
+                remote=remote,
+                overview=overview,
+                resolutions=resolutions,
+                stages=stages,
+            )
+            summary_url = report.summary_url if report else None
+
+        if progress_ref is not None:
+            assert session.target is not None and session.token is not None
+            try:
+                finish_progress(session.target, session.token, progress_ref, result, summary_url)
+            except SourceError as exc:
+                result.status = ReviewStatus.PARTIAL
+                result.errors.append(f"could not update review progress: {exc}")
+            progress_closed = True
+    finally:
+        if progress_ref is not None and not progress_closed:
+            assert session.target is not None and session.token is not None
+            try:
+                finish_progress(session.target, session.token, progress_ref, None)
+            except SourceError as exc:
+                log.warning("could not mark review progress as failed: %s", exc)
+
+    assert result is not None
     shared.emit(
         session,
         result,
@@ -673,13 +715,13 @@ def _publish(
     remote: RemoteState | None = None,
     overview: _Overview | None = None,
     resolutions: tuple[Resolution, ...] = (),
-) -> None:
+) -> PublishReport | None:
     store = StateStore(repo)
     key = review_key(target.provider, target.host, target.project, target.number)
     if remote is None:
         remote = _remote_state(console, target, token, result, repost=repost)
         if remote is None:
-            return
+            return None
     seen = frozenset({*_seen_fingerprints(repo, target, repost=repost), *remote.fingerprints})
 
     publisher_cls = GitLabPublisher if target.provider == "gitlab" else GitHubPublisher
@@ -703,7 +745,7 @@ def _publish(
         console.print(f"[bold red]could not post review[/] {exc}")
         result.status = ReviewStatus.PARTIAL
         result.errors.append(f"could not post review: {exc}")
-        return
+        return None
 
     store.record(
         key,
@@ -721,6 +763,7 @@ def _publish(
         # run that reported closing threads the forge never closed.
         result.status = ReviewStatus.PARTIAL
         result.errors.append(f"could not resolve {len(report.resolution_failed)} thread(s)")
+    return report
 
 
 def _report_publish(console: Console, report: PublishReport) -> None:

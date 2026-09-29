@@ -81,6 +81,7 @@ class GitLabPublisher:
                     ref=self.summary_ref,
                     refreshed=self.summary_refreshed,
                 )
+                report.summary_url = summary_url
 
             # Last, so a token that may comment but not set a status still leaves
             # the review behind rather than losing it to a failed check.
