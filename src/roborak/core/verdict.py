@@ -1,7 +1,7 @@
 """The pass/fail verdict, computed once.
 
 ``--fail-on`` has always decided whether a change should be blocked, but only ever
-said so through an exit code. The verdict now also ends the rendered report, rides
+said so through an exit code. The verdict now also leads the rendered report, rides
 along on the published summary comment, and lands on the forge as a commit status.
 Three surfaces stating the same thing is only safe if one function decides it, so
 this module is that function and nothing here imports ``render`` or ``publish``.

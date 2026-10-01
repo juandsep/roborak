@@ -126,6 +126,12 @@ export default function HowItWorks() {
 
       <H2>Two independent reasons a change is blocked</H2>
       <P>
+        Every review leads with its verdict, blocking floor, finding counts, completion status,
+        and exit gating, before the walkthrough and findings. The terminal, Markdown report,
+        and published comment carry the same decision. Partial or failed reviews are inconclusive
+        and exit with code 2 independently of <Code>--fail-on</Code>.
+      </P>
+      <P>
         A finding blocks when its severity reaches the floor. A pre-merge check blocks when the
         project set it to <Code>error</Code> and it failed. The two are deliberately not folded
         together: enforcement is not a severity, and making &ldquo;this pull request has no

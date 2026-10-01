@@ -59,6 +59,7 @@ from roborak.core.models import (
     InvestigationStatus,
     ReviewRange,
     ReviewResult,
+    ReviewStatus,
     SupplyChainReport,
     SupplyChainStatus,
     VerificationReport,
@@ -177,7 +178,7 @@ def render(
     machine_sections = collapsible or full
     grouped = group(result)
 
-    sections = [_header(result)]
+    sections = [_header(result), _pre_merge_check(result, form=form)]
 
     if walkthrough := result.walkthrough:
         if walkthrough.overview:
@@ -349,8 +350,7 @@ def _checks_section(result: ReviewResult, *, form: Form) -> str:
     body = _check_rows(report.results) if report and report.results else ""
     details = _check_details(report.results) if report else ""
     notes = "\n\n".join(_wrap(f"_{note}_") for note in report.notes) if report else ""
-    verdict = _pre_merge_check(result, form=form)
-    inner = "\n\n".join(part for part in (body, details, notes, verdict) if part)
+    inner = "\n\n".join(part for part in (body, details, notes) if part)
     if not inner:
         return ""
     return _details(
@@ -1243,7 +1243,7 @@ def _pre_merge_check(result: ReviewResult, *, form: Form) -> str:
 
     Rendered on every review, including a clean one: a verdict that appears only
     when something is wrong teaches the reader that its absence means nothing was
-    checked. It follows the individual results inside the combined checks section.
+    checked. It leads the report before the walkthrough and detailed checks.
 
     Because the summary comment *is* this document (``publish.base.summary_markdown``),
     writing it here is also what puts the verdict on the merge request, on every
@@ -1259,17 +1259,34 @@ def _pre_merge_check(result: ReviewResult, *, form: Form) -> str:
     floor_source = "`--fail-on`" if gate.explicit else "`review.block_on`"
     lines.append(f"Judged against **{gate.floor}** and above, from {floor_source}.")
     lines.append(f"Findings: {gate.counts_line()}.")
+    lines.append(_completion_note(result))
+    lines.append(_exit_gate_note(gate))
     if note := _verification_verdict_note(result.verification):
         lines.append(note)
     if note := _checks_verdict_note(gate, result.checks):
         lines.append(note)
-    if not gate.explicit:
-        lines.append(f"_Not gated: pass `--fail-on {gate.floor}` for the exit code too._")
     body = "\n\n".join(lines)
 
     if form is Form.PUBLISHED:
         body = _callout(_VERDICT_CALLOUT[gate.verdict], body)
     return f"### {_VERDICT_TITLE[gate.verdict]}\n\n{body}"
+
+
+def _completion_note(result: ReviewResult) -> str:
+    if result.status is ReviewStatus.PARTIAL:
+        return "Run: partial. Incomplete reviews exit with code 2, independently of --fail-on."
+    if result.errors or result.status is not ReviewStatus.COMPLETE:
+        return "Run: failed. Incomplete reviews exit with code 2, independently of --fail-on."
+    return "Run: complete."
+
+
+def _exit_gate_note(gate: Gate) -> str:
+    if gate.explicit:
+        return (
+            f"Exit gated by --fail-on {gate.floor} for findings at or above {gate.floor}. "
+            "Pre-merge check failures do not gate the exit code."
+        )
+    return f"Advisory verdict. Not gated: pass --fail-on {gate.floor} for the exit code too."
 
 
 def _checks_verdict_note(gate: Gate, report: ChecksReport | None) -> str:
