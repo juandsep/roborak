@@ -113,11 +113,13 @@ def test_finding_quality_is_the_mean_pass_rate_over_judged_checks():
         ]
     )
     assert metrics["judged"] == 2
+    assert metrics["judge_attempts"] == 2
+    assert metrics["judge_completion"] == 1.0
     assert metrics["finding_quality"] == 0.875
 
 
-def test_rows_without_a_judge_verdict_do_not_affect_finding_quality():
-    """Ungraded rows (no judge, or a judge that could not answer) are left out."""
+def test_rows_without_a_judge_key_are_not_judge_attempts():
+    """A row the judge never ran on (no ``judge`` key) is not a graded case at all."""
     ungraded = {
         "expected_category": "bug",
         "matched": True,
@@ -127,9 +129,35 @@ def test_rows_without_a_judge_verdict_do_not_affect_finding_quality():
         "errors": [],
         "tokens": 1,
     }
-    unanswered = ungraded | {"judge": None}
-    metrics = score([ungraded, unanswered])
+    metrics = score([ungraded])
+    assert metrics["judge_attempts"] == 0
     assert metrics["judged"] == 0
+    assert metrics["judge_completion"] == 1.0
+    assert metrics["finding_quality"] == 1.0
+
+
+def test_a_failed_judge_counts_as_an_attempt_that_did_not_complete():
+    """``judge: None`` means the judge was asked and could not answer -- not a pass."""
+    metrics = score(
+        [
+            _judged(states_trigger=True, states_consequence=True, states_fix=True, faithful=True),
+            {
+                "expected_category": "bug",
+                "matched": True,
+                "exact_anchor": True,
+                "findings": 1,
+                "blockers": 0,
+                "errors": [],
+                "tokens": 1,
+                "judge": None,
+            },
+        ]
+    )
+    assert metrics["judge_attempts"] == 2
+    assert metrics["judged"] == 1
+    assert metrics["judge_completion"] == 0.5
+    # The one verdict that came back is perfect, yet completion is below the bar: a
+    # run that could not grade half its representative cases has not vouched for them.
     assert metrics["finding_quality"] == 1.0
 
 

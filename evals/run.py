@@ -57,14 +57,19 @@ def score(rows: list[dict[str, object]]) -> dict[str, float | int]:
 
     # A finding is only as good as what the reader can act on, so the representative
     # cases that carry a judge verdict are scored on the rubric too -- the mean pass
-    # rate across every graded clarity/support check. Rows the judge could not grade
-    # (``judge`` is None or absent) are left out rather than counted as passes.
-    graded = [verdict for row in rows if isinstance((verdict := row.get("judge")), dict)]
+    # rate across every graded clarity/support check. A judge-tagged case that matched
+    # always records a ``judge`` entry: a dict when the judge answered, ``None`` when
+    # it could not. ``judge_completion`` keeps a run where every judge call failed from
+    # passing by default -- an unassessed review is not a clean one.
+    attempts = [row for row in rows if "judge" in row]
+    graded = [verdict for row in attempts if isinstance(verdict := row["judge"], dict)]
     checks = [bool(passed) for verdict in graded for passed in verdict.values()]
 
     return {
         "cases": len(rows),
+        "judge_attempts": len(attempts),
         "judged": len(graded),
+        "judge_completion": len(graded) / len(attempts) if attempts else 1.0,
         "finding_quality": sum(checks) / len(checks) if checks else 1.0,
         "recall": len(matched) / len(defects) if defects else 1.0,
         "clean_false_positive_rate": (
@@ -235,8 +240,11 @@ def main() -> int:
         or metrics["blocker_recall"] < 0.80
         or metrics["anchor_accuracy"] < 0.95
         or metrics["parse_success"] < 0.99
-        # Only gates when the judge actually graded something: a run with no judged
-        # cases leaves ``finding_quality`` at its empty default and must not fail.
+        # A judge that never answered cannot vouch for the prose. If the run tried to
+        # grade representative cases, most of those attempts must have come back, and
+        # what came back must clear the quality bar -- a skipped judge is a failed
+        # gate, not a free pass.
+        or (int(metrics["judge_attempts"]) > 0 and metrics["judge_completion"] < 0.80)
         or (int(metrics["judged"]) > 0 and metrics["finding_quality"] < 0.80)
         or float(semantic_metrics["recall"]) < float(baseline_metrics["recall"])
         or float(semantic_metrics["clean_false_positive_rate"])
