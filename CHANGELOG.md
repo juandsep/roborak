@@ -10,6 +10,17 @@ the GitHub Release body, so the `## [x.y.z] - date` heading format is load-beari
 
 ## [Unreleased]
 
+### Changed
+
+- **The human-readable report now leads with the pre-merge verdict.** The
+  pass/blocked/inconclusive decision, the blocking floor and where it came from,
+  finding counts, and whether the run was partial appear at the top of the report,
+  before the walkthrough and detailed findings, on both the terminal and the
+  published Markdown. The summary states whether the exit code is gated by
+  `--fail-on` or the verdict is advisory, and distinguishes a blocked review from
+  an inconclusive or partial one. A clean, complete run stays compact: the
+  run-status line appears only when a run was partial or failed.
+
 ## [0.9.0] - 2026-09-09
 
 ### Added
