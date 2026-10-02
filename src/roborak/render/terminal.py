@@ -482,11 +482,12 @@ def _render_verdict(result: ReviewResult, console: Console) -> None:
         return
     gate = gate_for(result)
     label, style = VERDICT_STYLE[gate.verdict]
-    console.print(f"[{style}]{label}[/] [dim]{gate.summary_line()}[/]")
+    console.print(f"[{style}]{label}[/] [dim]· {gate.summary_line()}[/]")
     source = "--fail-on" if gate.explicit else "review.block_on"
     console.print(f"[dim]floor: {gate.floor} (from {source}) · {gate.counts_line()}[/]")
     _render_checks(result.checks, gate, console)
-    console.print(Text(_completion_note(result), style="dim"))
+    if note := _completion_note(result):
+        console.print(Text(note, style="dim"))
     console.print(Text(_exit_gate_note(gate), style="dim"))
 
 

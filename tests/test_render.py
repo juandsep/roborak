@@ -1172,7 +1172,7 @@ def test_the_block_names_the_floor_and_where_it_came_from():
 def test_an_implicit_floor_says_the_exit_code_is_not_gated_on_it():
     result = make_result()
     result.block_on = Severity.CRITICAL
-    assert "Not gated: pass --fail-on critical" in markdown.render(result)
+    assert "Not gated: pass `--fail-on critical`" in markdown.render(result)
 
 
 def test_an_explicit_floor_does_not_repeat_the_advice():
@@ -1180,6 +1180,22 @@ def test_an_explicit_floor_does_not_repeat_the_advice():
     result.block_on = Severity.CRITICAL
     result.block_on_explicit = True
     assert "Not gated" not in markdown.render(result)
+
+
+def test_markdown_backticks_the_flag_the_terminal_leaves_plain():
+    """Same wording, surface-appropriate styling: Markdown gets inline code."""
+    result = make_result()
+    result.block_on = Severity.CRITICAL
+    assert "`--fail-on critical`" in markdown.render(result)
+    assert "`--fail-on critical`" not in render_terminal(result, width=200)
+
+
+def test_the_terminal_verdict_separates_label_from_summary():
+    result = make_result()
+    result.block_on = Severity.CRITICAL
+    assert "pre-merge check: blocked · 1 finding at or above critical." in render_terminal(
+        result, width=200
+    )
 
 
 @pytest.mark.parametrize("form", list(markdown.Form))
@@ -2017,14 +2033,19 @@ def test_lead_decision_agrees_across_surfaces(
             assert lower.index(f"pre-merge check: {expected}") < lower.index("sql injection")
         lead = lower[: lower.index("introduces a session cache")]
         assert all(count.lower() in lead for count in counts)
-        assert f"Run: {completion}." in document
-        if completion != "complete":
-            assert "Incomplete reviews exit with code 2" in document
-        if explicit:
-            assert "Exit gated by --fail-on critical" in document
-            assert "Pre-merge check failures do not gate the exit code." in document
+        # Markdown backticks the flag tokens, the terminal keeps them plain; the
+        # wording either way has to agree, so compare it with the styling stripped.
+        plain = document.replace("`", "")
+        if completion == "complete":
+            assert f"Run: {completion}." not in document
         else:
-            assert "Advisory verdict. Not gated:" in document
+            assert f"Run: {completion}." in document
+            assert "Incomplete reviews exit with code 2" in plain
+        if explicit:
+            assert "Exit gated by --fail-on critical" in plain
+            assert "Pre-merge check failures do not gate the exit code." in plain
+        else:
+            assert "Advisory verdict. Not gated:" in plain
     payload = json.loads(json_out.render(result))["summary"]
     assert payload["verdict"] == ("error" if expected == "inconclusive" else expected)
     assert payload["by_severity"] == ({"critical": 1, "minor": 1} if has_findings else {})

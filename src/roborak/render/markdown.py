@@ -1259,8 +1259,9 @@ def _pre_merge_check(result: ReviewResult, *, form: Form) -> str:
     floor_source = "`--fail-on`" if gate.explicit else "`review.block_on`"
     lines.append(f"Judged against **{gate.floor}** and above, from {floor_source}.")
     lines.append(f"Findings: {gate.counts_line()}.")
-    lines.append(_completion_note(result))
-    lines.append(_exit_gate_note(gate))
+    if note := _completion_note(result, tt=_as_code):
+        lines.append(note)
+    lines.append(_exit_gate_note(gate, tt=_as_code))
     if note := _verification_verdict_note(result.verification):
         lines.append(note)
     if note := _checks_verdict_note(gate, result.checks):
@@ -1272,21 +1273,39 @@ def _pre_merge_check(result: ReviewResult, *, form: Form) -> str:
     return f"### {_VERDICT_TITLE[gate.verdict]}\n\n{body}"
 
 
-def _completion_note(result: ReviewResult) -> str:
+def _as_code(text: str) -> str:
+    """Wrap a flag or token in Markdown inline code. The terminal passes ``str``."""
+    return f"`{text}`"
+
+
+def _completion_note(result: ReviewResult, *, tt: Callable[[str], str] = str) -> str:
+    """How the run ended, stated only when it ended badly.
+
+    A complete run is the common case and says nothing a reader needs above the
+    findings, so it is silent; partial and failed runs exit with code 2 regardless
+    of ``--fail-on``, which is the one thing that has to be said here. ``tt`` styles
+    the flag tokens for Markdown and is identity for the terminal.
+    """
     if result.status is ReviewStatus.PARTIAL:
-        return "Run: partial. Incomplete reviews exit with code 2, independently of --fail-on."
-    if result.errors or result.status is not ReviewStatus.COMPLETE:
-        return "Run: failed. Incomplete reviews exit with code 2, independently of --fail-on."
-    return "Run: complete."
+        kind = "partial"
+    elif result.errors or result.status is not ReviewStatus.COMPLETE:
+        kind = "failed"
+    else:
+        return ""
+    return (
+        f"Run: {kind}. Incomplete reviews exit with {tt('code 2')}, "
+        f"independently of {tt('--fail-on')}."
+    )
 
 
-def _exit_gate_note(gate: Gate) -> str:
+def _exit_gate_note(gate: Gate, *, tt: Callable[[str], str] = str) -> str:
     if gate.explicit:
         return (
-            f"Exit gated by --fail-on {gate.floor} for findings at or above {gate.floor}. "
-            "Pre-merge check failures do not gate the exit code."
+            f"Exit gated by {tt(f'--fail-on {gate.floor}')} for findings at or above "
+            f"{gate.floor}. Pre-merge check failures do not gate the exit code."
         )
-    return f"Advisory verdict. Not gated: pass --fail-on {gate.floor} for the exit code too."
+    flag = tt(f"--fail-on {gate.floor}")
+    return f"Advisory verdict. Not gated: pass {flag} for the exit code too."
 
 
 def _checks_verdict_note(gate: Gate, report: ChecksReport | None) -> str:
