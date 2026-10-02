@@ -38,7 +38,7 @@ Touching any of these? Say so above, and say what you checked.
 - stdout is the product, stderr is the chrome.
 - Never prompt when not on a terminal.
 
-If you changed prompts, the validator or the parser, run `uv run python evals/run.py`
+If you changed prompts, the validator or the parser, run `uv run python -m evals.run`
 and paste the gate numbers - a recall win that quietly raises false positives is
 what it exists to catch.
 -->

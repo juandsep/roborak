@@ -31,7 +31,7 @@ uv run pytest -k anchor                                # by name
 
 uv run roborak review --no-llm     # exercise the whole pipeline with no API key (static only)
 uv run roborak review --base main  # dogfood on your own branch before asking for review
-uv run python evals/run.py         # 30 labeled cases; real model calls, out of PR CI, run nightly
+uv run python -m evals.run         # 30 labeled cases; real model calls, out of PR CI, run nightly
 ```
 
 Docs site (`docs/`, Vite + React Router + Tailwind, Node 20+):
