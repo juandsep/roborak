@@ -876,7 +876,9 @@ uv run mypy src/roborak
 Live reviewer-quality evaluation is intentionally separate from deterministic PR
 CI. `uv run python evals/run.py` exercises 30 labeled defect and clean-control
 cases, writes token and quality metrics, and enforces the nightly recall,
-false-positive, anchoring, and parse-success gates.
+false-positive, anchoring, and parse-success gates. Representative cases are also
+graded by an LLM judge on whether the rendered finding states the trigger,
+consequence, and fix, and that `finding-quality` score is gated too.
 
 Conventions, invariants and the PR checklist are in
 [CONTRIBUTING.md](https://github.com/rdlugs/roborak/blob/main/CONTRIBUTING.md).

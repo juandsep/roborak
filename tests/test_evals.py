@@ -1,3 +1,4 @@
+from evals.judge import parse_judge_reply
 from evals.run import compare_chunking, score
 
 
@@ -90,6 +91,48 @@ def test_rows_without_a_blocker_label_are_left_out_of_both_metrics():
     assert metrics["blocker_recall"] == 1.0
 
 
+def _judged(**verdict: bool) -> dict[str, object]:
+    return {
+        "expected_category": "bug",
+        "matched": True,
+        "exact_anchor": True,
+        "findings": 1,
+        "blockers": 0,
+        "errors": [],
+        "tokens": 1,
+        "judge": verdict,
+    }
+
+
+def test_finding_quality_is_the_mean_pass_rate_over_judged_checks():
+    """A perfect verdict and one with a single failed check average across checks."""
+    metrics = score(
+        [
+            _judged(states_trigger=True, states_consequence=True, states_fix=True, faithful=True),
+            _judged(states_trigger=True, states_consequence=True, states_fix=True, faithful=False),
+        ]
+    )
+    assert metrics["judged"] == 2
+    assert metrics["finding_quality"] == 0.875
+
+
+def test_rows_without_a_judge_verdict_do_not_affect_finding_quality():
+    """Ungraded rows (no judge, or a judge that could not answer) are left out."""
+    ungraded = {
+        "expected_category": "bug",
+        "matched": True,
+        "exact_anchor": True,
+        "findings": 1,
+        "blockers": 0,
+        "errors": [],
+        "tokens": 1,
+    }
+    unanswered = ungraded | {"judge": None}
+    metrics = score([ungraded, unanswered])
+    assert metrics["judged"] == 0
+    assert metrics["finding_quality"] == 1.0
+
+
 def test_chunking_comparison_reports_recall_and_false_positive_deltas():
     defect = _row(expect_blocker=True, blockers=1)
     missed = defect | {"matched": False, "matched_blocker": False, "blockers": 0}
@@ -108,3 +151,27 @@ def test_chunking_comparison_reports_recall_and_false_positive_deltas():
 
     assert comparison["recall_delta"] == 1.0
     assert comparison["clean_false_positive_rate_delta"] == -1.0
+
+
+def test_judge_reply_parses_a_full_boolean_verdict():
+    verdict = parse_judge_reply(
+        "states_trigger: true\nstates_consequence: true\nstates_fix: false\nfaithful: true\n"
+    )
+    assert verdict == {
+        "states_trigger": True,
+        "states_consequence": True,
+        "states_fix": False,
+        "faithful": True,
+    }
+
+
+def test_judge_reply_is_untrusted_when_a_field_is_missing_or_unparseable():
+    """A half-answered or malformed reply graded nothing -- it must not pass by default."""
+    missing = parse_judge_reply("states_trigger: true\nstates_consequence: true\n")
+    assert missing is None
+    non_boolean = parse_judge_reply(
+        "states_trigger: maybe\nstates_consequence: true\nstates_fix: true\nfaithful: true\n"
+    )
+    assert non_boolean is None
+    assert parse_judge_reply("not: [valid") is None
+    assert parse_judge_reply("just a sentence") is None

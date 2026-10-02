@@ -265,7 +265,13 @@ findings:
     kind: potential_issue | refactor_suggestion | nitpick | verification_needed{% if check_requirements %} | requirement_gap{% endif %}
     effort: quick_win | moderate | heavy_lift
     title: <under 60 chars, names the problem, not the file>
-    body: <2-4 sentences: what is wrong, why it matters, how to fix it>
+    body: <2-4 sentences. When the evidence supports them, name the concrete
+      trigger (the input or condition that provokes it), the observable
+      consequence (what goes wrong for a real input), and a practical fix
+      direction. Do not invent a specific patch when the fix is uncertain -- give
+      the direction, or say exactly what to verify. When `evidence` is
+      `unverified`, write it as reasoning, not a reproduction: do not imply you
+      ran it, and name what would confirm it.>
     confidence: <0.0-1.0, your honest certainty this is a real problem>
     evidence: execution_path | reproduction | contract | unverified
     evidence_note: <one sentence naming the trigger and failure path, the violated
