@@ -12,6 +12,16 @@ the GitHub Release body, so the `## [x.y.z] - date` heading format is load-beari
 
 ### Changed
 
+- **Review findings now state the trigger, consequence, and fix.** The review and
+  improve prompts ask each finding's body to name the concrete trigger (the input
+  or condition that provokes it), the observable consequence, and a practical fix
+  direction when the evidence supports them, without inventing a patch where the fix
+  is uncertain and without implying a failure was reproduced when it was only
+  reasoned about. `evidence_note` stays the checkable basis and the evidence and
+  severity safeguards are unchanged. The nightly eval now grades representative
+  cases with an LLM judge for whether the rendered finding states these clearly and
+  is supported by the diff, and gates on that `finding_quality` score.
+
 - **The human-readable report now leads with the pre-merge verdict.** The
   pass/blocked/inconclusive decision, the blocking floor and where it came from,
   finding counts, and whether the run was partial appear at the top of the report,

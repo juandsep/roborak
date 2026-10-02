@@ -117,7 +117,7 @@ asserts on a hand-written fixture, for the reason above.
 ## Evals
 
 ```bash
-uv run python evals/run.py
+uv run python -m evals.run
 ```
 
 30 labeled defect and clean-control cases in `evals/cases.yaml`, with recall,
