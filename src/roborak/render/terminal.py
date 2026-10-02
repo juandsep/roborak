@@ -50,7 +50,7 @@ from roborak.core.severity import (
 from roborak.core.verdict import Gate, Verdict, gate_for, verdict_requested
 from roborak.render import snippet
 from roborak.render.lexers import lexer_for
-from roborak.render.markdown import FLOW_SUMMARY
+from roborak.render.markdown import FLOW_SUMMARY, _completion_note, _exit_gate_note
 
 MAX_SUPPLY_CHAIN_LINES = 5
 """Dependency movements named in the terminal. The delta is already ordered most
@@ -59,7 +59,7 @@ the markdown report, which has a table."""
 
 
 def render(result: ReviewResult, console: Console, repo: Path) -> None:
-    """The review in the order a terminal reader takes it: errors, what ran, the findings."""
+    """Lead with the decision, then the walkthrough, stages, and findings."""
     if result.errors:
         for error in result.errors:
             console.print(f"[bold red]error[/] {error}")
@@ -67,6 +67,8 @@ def render(result: ReviewResult, console: Console, repo: Path) -> None:
     changeset = result.changeset
     if changeset is None or not changeset.is_empty:
         _render_header(result, console)
+    _render_verdict(result, console)
+    _render_walkthrough(result, console)
 
     _render_verification(result.verification, console)
     _render_impact(result.impact, console)
@@ -284,7 +286,7 @@ def _render_buckets(result: ReviewResult, console: Console, repo: Path) -> None:
 
 
 def _render_header(result: ReviewResult, console: Console) -> None:
-    """What was reviewed, and what the change does.
+    """The title and metadata of what was reviewed.
 
     Mirrors ``markdown._header`` field for field: the two renderers describe the
     same review, so they must not be able to describe it differently.
@@ -302,6 +304,9 @@ def _render_header(result: ReviewResult, console: Console) -> None:
             console.print()
         console.print(Text(" · ".join(meta), style="dim"))
 
+
+def _render_walkthrough(result: ReviewResult, console: Console) -> None:
+    walkthrough = result.walkthrough
     if walkthrough is None:
         return
 
@@ -477,12 +482,13 @@ def _render_verdict(result: ReviewResult, console: Console) -> None:
         return
     gate = gate_for(result)
     label, style = VERDICT_STYLE[gate.verdict]
-    console.print(f"[{style}]{label}[/] [dim]{gate.summary_line()}[/]")
+    console.print(f"[{style}]{label}[/] [dim]· {gate.summary_line()}[/]")
     source = "--fail-on" if gate.explicit else "review.block_on"
     console.print(f"[dim]floor: {gate.floor} (from {source}) · {gate.counts_line()}[/]")
     _render_checks(result.checks, gate, console)
-    if not gate.explicit:
-        console.print(f"[dim]pass --fail-on {gate.floor} to gate the exit code on this[/]")
+    if note := _completion_note(result):
+        console.print(Text(note, style="dim"))
+    console.print(Text(_exit_gate_note(gate), style="dim"))
 
 
 def _render_checks(report: ChecksReport | None, gate: Gate, console: Console) -> None:
@@ -506,7 +512,6 @@ def _render_checks(report: ChecksReport | None, gate: Gate, console: Console) ->
 
 
 def _render_footer(result: ReviewResult, console: Console) -> None:
-    _render_verdict(result, console)
     if result.issue is not None:
         issue = result.issue
         label = f"{issue.reference} - {issue.title}" if issue.title else issue.reference

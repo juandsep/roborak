@@ -36,6 +36,7 @@ from roborak.core.models import (
     ReviewRange,
     ReviewResult,
     ReviewRole,
+    ReviewStatus,
     Walkthrough,
 )
 from roborak.core.severity import Category, Effort, Enforcement, Evidence, Kind, Severity
@@ -1138,7 +1139,7 @@ def test_a_clean_review_is_still_signed():
 
 
 @pytest.mark.parametrize("form", list(markdown.Form))
-def test_every_review_ends_with_a_pre_merge_check(form):
+def test_every_review_leads_with_a_pre_merge_check(form):
     """Both surfaces, so the terminal and the merge request state the same thing."""
     result = make_result()
     result.block_on = Severity.CRITICAL
@@ -1181,14 +1182,31 @@ def test_an_explicit_floor_does_not_repeat_the_advice():
     assert "Not gated" not in markdown.render(result)
 
 
-def test_the_check_is_the_last_section_before_the_footer():
-    """It is the one thing a reader who skims the review still has to see."""
+def test_markdown_backticks_the_flag_the_terminal_leaves_plain():
+    """Same wording, surface-appropriate styling: Markdown gets inline code."""
     result = make_result()
     result.block_on = Severity.CRITICAL
-    document = markdown.render(result)
-    signature = markdown._signature(form=markdown.Form.PUBLISHED)
-    assert document.index("Pre-merge check") < document.rindex("\n---\n")
-    assert document.index("Pre-merge check") < document.index(signature)
+    assert "`--fail-on critical`" in markdown.render(result)
+    assert "`--fail-on critical`" not in render_terminal(result, width=200)
+
+
+def test_the_terminal_verdict_separates_label_from_summary():
+    result = make_result()
+    result.block_on = Severity.CRITICAL
+    assert "pre-merge check: blocked · 1 finding at or above critical." in render_terminal(
+        result, width=200
+    )
+
+
+@pytest.mark.parametrize("form", list(markdown.Form))
+def test_the_verdict_precedes_walkthrough_and_findings(form):
+    result = make_result(walkthrough=True)
+    result.block_on = Severity.CRITICAL
+    document = markdown.render(result, form=form)
+    assert document.count("Pre-merge check: blocked") == 1
+    assert document.index("# Add session lookup") < document.index("Pre-merge check: blocked")
+    assert document.index("Pre-merge check: blocked") < document.index("Introduces a session cache")
+    assert document.index("Pre-merge check: blocked") < document.index("SQL injection")
 
 
 def test_an_incomplete_review_is_inconclusive_rather_than_blocked():
@@ -1208,21 +1226,17 @@ def test_the_published_check_is_a_callout_the_forge_renders():
     assert "> [!TIP]" in markdown.render(ReviewResult(block_on=Severity.CRITICAL))
 
 
-def test_the_published_checks_contain_the_verdict() -> None:
-    result = make_result()
+def test_the_published_verdict_is_visible_outside_details() -> None:
+    result = make_result(walkthrough=True)
     result.block_on = Severity.CRITICAL
     document = markdown.render(result)
-
-    summary = "<summary>ℹ️ Pre-merge checks</summary>"
-    opened = document.index(summary)
-    section = document[opened : document.index("</details>", opened)]
-
-    assert "### ⛔ Pre-merge check: blocked" in section
-    assert "<summary>⛔ Pre-merge check: blocked</summary>" not in document
-    assert "> [!CAUTION]" in section
-    assert "> Judged against **critical** and above" in section
-    assert "> Findings:" in section
-    assert "\U0001f534 Critical 1" in section
+    lead = document[: document.index("<details")]
+    assert "### ⛔ Pre-merge check: blocked" in lead
+    assert "> [!CAUTION]" in lead
+    assert "> Judged against **critical** and above" in lead
+    assert "> Findings:" in lead
+    assert "🔴 Critical 1" in lead
+    assert "<summary>ℹ️ Pre-merge checks</summary>" not in document
 
 
 def test_the_terminal_check_carries_no_html_that_rich_would_drop():
@@ -1766,7 +1780,7 @@ def test_check_detail_and_opinion_preserve_multiline_markdown(
     assert "### Title\n\n**Detail**\n\nTitle detail.\n\nA second paragraph." in document
     assert "**Model opinion**\n\nTitle opinion.\n\nA separate paragraph." in document
     assert document.index("A separate paragraph.") < document.index("Report note.")
-    assert document.index("Report note.") < document.index("Pre-merge check: pass")
+    assert document.index("Pre-merge check: pass") < document.index("Report note.")
     assert "Not counted: Description (`warning`) failed on the model's opinion alone" in document
     if form is markdown.Form.PUBLISHED:
         assert summary_markdown(result) == document
@@ -1819,8 +1833,8 @@ def test_checks_expand_for_failed_results_regardless_of_enforcement(
         if outcome is CheckOutcome.FAILED and level is Enforcement.ERROR and not advisory
         else "pass"
     )
-    assert f"Pre-merge check: {expected}" in section
-    assert section.index("| Check |") < section.index("Pre-merge check:")
+    assert "Pre-merge check:" not in section
+    assert document.index(f"Pre-merge check: {expected}") < document.index("| Check |")
     if advisory:
         assert "(advisory)" in section
     assert summary_markdown(result) == document
@@ -1838,7 +1852,7 @@ def test_checks_without_results_preserve_only_requested_verdicts(
 ) -> None:
     result = ReviewResult(checks=report, block_on=Severity.CRITICAL if requested else None)
     document = markdown.render(result)
-    present = requested or bool(report and report.notes)
+    present = bool(report and report.notes)
     assert ("<summary>ℹ️ Pre-merge checks</summary>" in document) is present
     assert ("Pre-merge check: pass" in document) is requested
     assert "<details open>" not in document
@@ -1965,3 +1979,79 @@ def test_the_checks_reach_the_json_payload_with_what_blocked_stated():
     assert payload["checks"]["results"][0]["advisory"] is True
     assert payload["checks"]["results"][0]["blocks"] is False
     assert payload["summary"]["blocking_checks"] == []
+
+
+@pytest.mark.parametrize(
+    ("status", "errors", "has_findings", "expected", "completion"),
+    [
+        (ReviewStatus.COMPLETE, [], False, "pass", "complete"),
+        (ReviewStatus.COMPLETE, [], True, "blocked", "complete"),
+        (ReviewStatus.PARTIAL, [], False, "inconclusive", "partial"),
+        (ReviewStatus.PARTIAL, [], True, "inconclusive", "partial"),
+        (ReviewStatus.FAILED, [], False, "inconclusive", "failed"),
+        (ReviewStatus.COMPLETE, ["Model timed out"], True, "inconclusive", "failed"),
+    ],
+)
+@pytest.mark.parametrize("explicit", [False, True])
+def test_lead_decision_agrees_across_surfaces(
+    status: ReviewStatus,
+    errors: list[str],
+    has_findings: bool,
+    expected: str,
+    completion: str,
+    explicit: bool,
+) -> None:
+    from io import StringIO
+
+    from roborak.publish.base import summary_markdown
+    from roborak.render.rich_report import print_report
+
+    result = make_result(walkthrough=True)
+    result.block_on = Severity.CRITICAL
+    result.block_on_explicit = explicit
+    result.status = status
+    result.errors = errors
+    if not has_findings:
+        result.findings = []
+    stream = StringIO()
+    print_report(result, Path("."), Console(file=stream, width=200, force_terminal=False))
+    published = markdown.render(result)
+    assert summary_markdown(result) == published
+    counts = ["Critical 1", "Minor 1"] if has_findings else ["none"]
+    for document in [
+        published,
+        markdown.render(result, form=markdown.Form.TERMINAL),
+        render_terminal(result, width=200),
+        stream.getvalue(),
+    ]:
+        lower = document.lower()
+        assert lower.count(f"pre-merge check: {expected}") == 1
+        assert lower.index(f"pre-merge check: {expected}") < lower.index(
+            "introduces a session cache"
+        )
+        if has_findings:
+            assert lower.index(f"pre-merge check: {expected}") < lower.index("sql injection")
+        lead = lower[: lower.index("introduces a session cache")]
+        assert all(count.lower() in lead for count in counts)
+        # Markdown backticks the flag tokens, the terminal keeps them plain; the
+        # wording either way has to agree, so compare it with the styling stripped.
+        plain = document.replace("`", "")
+        if completion == "complete":
+            assert f"Run: {completion}." not in document
+        else:
+            assert f"Run: {completion}." in document
+            assert "Incomplete reviews exit with code 2" in plain
+        if explicit:
+            assert "Exit gated by --fail-on critical" in plain
+            assert "Pre-merge check failures do not gate the exit code." in plain
+        else:
+            assert "Advisory verdict. Not gated:" in plain
+    payload = json.loads(json_out.render(result))["summary"]
+    assert payload["verdict"] == ("error" if expected == "inconclusive" else expected)
+    assert payload["by_severity"] == ({"critical": 1, "minor": 1} if has_findings else {})
+
+
+def test_empty_panel_review_still_leads_with_decision() -> None:
+    result = ReviewResult(changeset=ChangeSet(), block_on=Severity.CRITICAL)
+    text = render_terminal(result)
+    assert text.index("pre-merge check: pass") < text.index("No changes to review")

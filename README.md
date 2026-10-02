@@ -184,10 +184,10 @@ uv run roborak -q review         # errors only: no stage lines
 
 ### The pre-merge check
 
-Every review ends with a pre-merge check: the verdict, the severity floor it was judged
-against, and the finding counts that drove it. It is the last section of the report, so it
-shows in the terminal, in `--markdown` output, and - because the summary comment *is* the
-report - on the merge request too, on every re-run.
+Every review leads with a pre-merge check: the verdict, the severity floor it was judged
+against, finding counts, completion status, and exit gating. It appears before the walkthrough
+and detailed findings in the terminal, in `--markdown` output, and - because the summary
+comment *is* the report - on the merge request too, on every re-run.
 
 The floor is `--fail-on` when you pass it, and `review.block_on` (default `critical`)
 otherwise. Only `--fail-on` moves the exit code; without it the block says so rather than

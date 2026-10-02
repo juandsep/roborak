@@ -59,6 +59,7 @@ from roborak.core.models import (
     InvestigationStatus,
     ReviewRange,
     ReviewResult,
+    ReviewStatus,
     SupplyChainReport,
     SupplyChainStatus,
     VerificationReport,
@@ -177,7 +178,7 @@ def render(
     machine_sections = collapsible or full
     grouped = group(result)
 
-    sections = [_header(result)]
+    sections = [_header(result), _pre_merge_check(result, form=form)]
 
     if walkthrough := result.walkthrough:
         if walkthrough.overview:
@@ -349,8 +350,7 @@ def _checks_section(result: ReviewResult, *, form: Form) -> str:
     body = _check_rows(report.results) if report and report.results else ""
     details = _check_details(report.results) if report else ""
     notes = "\n\n".join(_wrap(f"_{note}_") for note in report.notes) if report else ""
-    verdict = _pre_merge_check(result, form=form)
-    inner = "\n\n".join(part for part in (body, details, notes, verdict) if part)
+    inner = "\n\n".join(part for part in (body, details, notes) if part)
     if not inner:
         return ""
     return _details(
@@ -1243,7 +1243,7 @@ def _pre_merge_check(result: ReviewResult, *, form: Form) -> str:
 
     Rendered on every review, including a clean one: a verdict that appears only
     when something is wrong teaches the reader that its absence means nothing was
-    checked. It follows the individual results inside the combined checks section.
+    checked. It leads the report before the walkthrough and detailed checks.
 
     Because the summary comment *is* this document (``publish.base.summary_markdown``),
     writing it here is also what puts the verdict on the merge request, on every
@@ -1259,17 +1259,53 @@ def _pre_merge_check(result: ReviewResult, *, form: Form) -> str:
     floor_source = "`--fail-on`" if gate.explicit else "`review.block_on`"
     lines.append(f"Judged against **{gate.floor}** and above, from {floor_source}.")
     lines.append(f"Findings: {gate.counts_line()}.")
+    if note := _completion_note(result, tt=_as_code):
+        lines.append(note)
+    lines.append(_exit_gate_note(gate, tt=_as_code))
     if note := _verification_verdict_note(result.verification):
         lines.append(note)
     if note := _checks_verdict_note(gate, result.checks):
         lines.append(note)
-    if not gate.explicit:
-        lines.append(f"_Not gated: pass `--fail-on {gate.floor}` for the exit code too._")
     body = "\n\n".join(lines)
 
     if form is Form.PUBLISHED:
         body = _callout(_VERDICT_CALLOUT[gate.verdict], body)
     return f"### {_VERDICT_TITLE[gate.verdict]}\n\n{body}"
+
+
+def _as_code(text: str) -> str:
+    """Wrap a flag or token in Markdown inline code. The terminal passes ``str``."""
+    return f"`{text}`"
+
+
+def _completion_note(result: ReviewResult, *, tt: Callable[[str], str] = str) -> str:
+    """How the run ended, stated only when it ended badly.
+
+    A complete run is the common case and says nothing a reader needs above the
+    findings, so it is silent; partial and failed runs exit with code 2 regardless
+    of ``--fail-on``, which is the one thing that has to be said here. ``tt`` styles
+    the flag tokens for Markdown and is identity for the terminal.
+    """
+    if result.status is ReviewStatus.PARTIAL:
+        kind = "partial"
+    elif result.errors or result.status is not ReviewStatus.COMPLETE:
+        kind = "failed"
+    else:
+        return ""
+    return (
+        f"Run: {kind}. Incomplete reviews exit with {tt('code 2')}, "
+        f"independently of {tt('--fail-on')}."
+    )
+
+
+def _exit_gate_note(gate: Gate, *, tt: Callable[[str], str] = str) -> str:
+    if gate.explicit:
+        return (
+            f"Exit gated by {tt(f'--fail-on {gate.floor}')} for findings at or above "
+            f"{gate.floor}. Pre-merge check failures do not gate the exit code."
+        )
+    flag = tt(f"--fail-on {gate.floor}")
+    return f"Advisory verdict. Not gated: pass {flag} for the exit code too."
 
 
 def _checks_verdict_note(gate: Gate, report: ChecksReport | None) -> str:
