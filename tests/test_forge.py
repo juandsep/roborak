@@ -215,7 +215,7 @@ def test_review_progress_is_created_then_reused_and_completed(monkeypatch, provi
     assert writes[0][0] == "POST"
     initial_body = (
         "### 🔎 Review in progress\n\n"
-        f'<img src="{progress.LOADING_GIF_URL}" width="220" height="220" '
+        f'<img src="{progress.LOADING_GIF_URL}" width="160" height="128" '
         'alt="Animated loading indicator: the roborak review is still running">\n\n'
         "roborak is reviewing this change. "
         "This comment will be updated when the review is complete.\n\n"
